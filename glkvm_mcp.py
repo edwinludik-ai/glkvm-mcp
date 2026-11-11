@@ -42,7 +42,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Optional, TypedDict
+from typing import Optional, Sequence, TypedDict
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -70,10 +70,16 @@ LOG = logging.getLogger("glkvm_mcp")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # ---------------------------------------------------------------------------
-# Key map: printable ASCII -> (W3C KeyboardEvent.code, needs_shift)
-# US layout. Covers the characters most users actually type.
+# Key maps: char -> (W3C KeyboardEvent.code, modifiers to hold)
+# The codes are physical key positions; the remote OS applies its own layout,
+# so GLKVM_KEYMAP must match the keyboard layout set on the remote machine.
 # ---------------------------------------------------------------------------
-def _build_keymap() -> dict[str, tuple[str, bool]]:
+_SHIFT = ("ShiftLeft",)
+_ALTGR = ("AltRight",)
+
+
+def _build_keymap() -> dict[str, tuple[str, tuple[str, ...]]]:
+    """US layout."""
     m: dict[str, tuple[str, bool]] = {}
     for c in "abcdefghijklmnopqrstuvwxyz":
         m[c] = (f"Key{c.upper()}", False)
@@ -103,10 +109,54 @@ def _build_keymap() -> dict[str, tuple[str, bool]]:
         "`": ("Backquote", False), "~": ("Backquote", True),
     }
     m.update(extras)
+    return {ch: (code, _SHIFT if shift else ()) for ch, (code, shift) in m.items()}
+
+
+def _build_keymap_de() -> dict[str, tuple[str, tuple[str, ...]]]:
+    """German (QWERTZ) layout, as set on the remote Windows/Linux machine."""
+    m: dict[str, tuple[str, tuple[str, ...]]] = {
+        " ": ("Space", ()), "\t": ("Tab", ()), "\n": ("Enter", ()), "\r": ("Enter", ()),
+    }
+    for c in "abcdefghijklmnopqrstuvwxyz":
+        code = {"y": "KeyZ", "z": "KeyY"}.get(c, f"Key{c.upper()}")
+        m[c] = (code, ())
+        m[c.upper()] = (code, _SHIFT)
+    for d, shifted in zip("0123456789", '=!"§$%&/()'):
+        m[d] = (f"Digit{d}", ())
+        m[shifted] = (f"Digit{d}", _SHIFT)
+    for d, altgr in zip("237890", "²³{[]}"):
+        m[altgr] = (f"Digit{d}", _ALTGR)
+    # (physical key, plain, shift, altgr); None = nothing useful on that level
+    rows = [
+        ("Minus", "ß", "?", "\\"),
+        ("Equal", None, "`", None),          # ` is a dead key, see DEAD_KEYS
+        ("BracketLeft", "ü", "Ü", None),
+        ("BracketRight", "+", "*", "~"),
+        ("Semicolon", "ö", "Ö", None),
+        ("Quote", "ä", "Ä", None),
+        ("Backslash", "#", "'", None),       # ISO key left of Enter
+        ("IntlBackslash", "<", ">", "|"),    # ISO key left of Y
+        ("Comma", ",", ";", None),
+        ("Period", ".", ":", None),
+        ("Slash", "-", "_", None),
+        ("Backquote", "^", "°", None),       # ^ is a dead key
+        ("KeyQ", None, None, "@"),
+        ("KeyE", None, None, "€"),
+        ("KeyM", None, None, "µ"),
+    ]
+    for code, plain, shifted, altgr in rows:
+        for ch, mods in ((plain, ()), (shifted, _SHIFT), (altgr, _ALTGR)):
+            if ch:
+                m[ch] = (code, mods)
     return m
 
 
-CHAR_TO_KEY = _build_keymap()
+KEYMAPS = {"us": (_build_keymap, set()), "de": (_build_keymap_de, {"^", "`"})}
+KEYMAP_NAME = os.environ.get("GLKVM_KEYMAP", "us").strip().lower()
+if KEYMAP_NAME not in KEYMAPS:
+    raise SystemExit(f"GLKVM_KEYMAP={KEYMAP_NAME!r} unsupported; use one of {sorted(KEYMAPS)}")
+CHAR_TO_KEY = KEYMAPS[KEYMAP_NAME][0]()
+DEAD_KEYS = KEYMAPS[KEYMAP_NAME][1]  # need a Space after them to produce the literal char
 
 # Aliases accepted in send_keys() chord strings. Maps lowercase user input ->
 # canonical W3C name used by GLKVM kvmd.
@@ -155,7 +205,7 @@ def resolve_key_name(name: str) -> str:
     if not name:
         raise ValueError("empty key name")
     # Already a W3C-style code
-    if name in CHAR_TO_KEY.values() or name.startswith(("Key", "Digit", "Numpad", "Arrow", "F")):
+    if name in {code for code, _ in CHAR_TO_KEY.values()} or name.startswith(("Key", "Digit", "Numpad", "Arrow", "F")):
         return name
     return KEY_ALIASES.get(name.lower(), name)
 
@@ -275,7 +325,7 @@ async def _atomic_press(conn: Connection, key: str, hold_s: float = MIN_DOWN_UP_
     await _ws_send_key(conn, key, state=False, finish=True)
 
 
-async def _press_with_modifiers(conn: Connection, key: str, modifiers: list[str]) -> None:
+async def _press_with_modifiers(conn: Connection, key: str, modifiers: Sequence[str]) -> None:
     """Mods down -> key atomic-press -> mods up. Caller holds send_lock."""
     for m in modifiers:
         await _ws_send_key(conn, m, state=True, finish=False)
@@ -471,9 +521,11 @@ async def kvm_send_text(text: str, wpm: int = 200) -> dict:
             if mapping is None:
                 skipped.append(ch)
                 continue
-            key, needs_shift = mapping
-            mods = ["ShiftLeft"] if needs_shift else []
+            key, mods = mapping
             await _press_with_modifiers(conn, key, mods)
+            if ch in DEAD_KEYS:
+                await asyncio.sleep(INTER_CHAR_GAP_S)
+                await _atomic_press(conn, "Space")
             sent += 1
             if inter > 0:
                 await asyncio.sleep(inter + INTER_CHAR_GAP_S)
@@ -946,5 +998,5 @@ if __name__ == "__main__":
     # Suppress noisy InsecureRequestWarning from urllib3 (we know — self-signed cert).
     import warnings
     warnings.filterwarnings("ignore", message="Unverified HTTPS request")
-    LOG.info("GLKVM MCP server ready on stdio (default host: %s)", os.environ.get("GLKVM_HOST") or "none, pass to kvm_connect")
+    LOG.info("GLKVM MCP server ready on stdio (default host: %s, keymap: %s)", os.environ.get("GLKVM_HOST") or "none, pass to kvm_connect", KEYMAP_NAME)
     mcp.run()  # stdio

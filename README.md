@@ -71,6 +71,8 @@ Python dependencies (`mcp`, `websockets`, `httpx`, `Pillow`, `pytesseract`) are 
 cp .env.example .env   # then edit; .env is gitignored
 ```
 
+Set `GLKVM_KEYMAP` to the keyboard layout of the **remote** machine (`us` default, or `de`); otherwise `kvm_send_text` types e.g. `z` as `y` on a German PC.
+
 With `GLKVM_HOST` and `GLKVM_PASSWORD` set, the agent can call `kvm_connect()` with no arguments. Real environment variables (e.g. an `env` block in your MCP client config) override `.env`.
 
 ## 🔧 Tools

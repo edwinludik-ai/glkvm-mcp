@@ -74,6 +74,19 @@ class SmokeTest(unittest.TestCase):
             msg=f"kvm_connect args should all be optional (.env fallback), got {required}",
         )
 
+    def test_keymaps(self):
+        mod = _load_module()
+        us, de = mod._build_keymap(), mod._build_keymap_de()
+        self.assertEqual(us["A"], ("KeyA", ("ShiftLeft",)))
+        self.assertEqual(us["z"], ("KeyZ", ()))
+        self.assertEqual(de["z"], ("KeyY", ()))
+        self.assertEqual(de["@"], ("KeyQ", ("AltRight",)))
+        self.assertEqual(de["|"], ("IntlBackslash", ("AltRight",)))
+        # every printable ASCII char is typeable on both layouts
+        for ch in map(chr, range(32, 127)):
+            self.assertIn(ch, us, ch)
+            self.assertIn(ch, de, ch)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
