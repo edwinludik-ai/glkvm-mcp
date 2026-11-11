@@ -279,6 +279,7 @@ dependencies = [
     { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pillow", version = "13.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pytesseract" },
+    { name = "python-dotenv" },
     { name = "websockets", version = "16.1.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "websockets", version = "17.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
@@ -289,6 +290,7 @@ requires-dist = [
     { name = "mcp", extras = ["cli"], specifier = ">=1.2,<2" },
     { name = "pillow", specifier = ">=10" },
     { name = "pytesseract", specifier = ">=0.3.13" },
+    { name = "python-dotenv", specifier = ">=1" },
     { name = "websockets", specifier = ">=12" },
 ]
 

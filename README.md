@@ -65,12 +65,20 @@ Add to your MCP client config (e.g., Claude Desktop `claude_desktop_config.json`
 
 Python dependencies (`mcp`, `websockets`, `httpx`, `Pillow`, `pytesseract`) are auto-installed by `uv run --script` via the inline PEP 723 metadata.
 
+### 3. (Optional) Store connection details in `.env`
+
+```bash
+cp .env.example .env   # then edit; .env is gitignored
+```
+
+With `GLKVM_HOST` and `GLKVM_PASSWORD` set, the agent can call `kvm_connect()` with no arguments. Real environment variables (e.g. an `env` block in your MCP client config) override `.env`.
+
 ## 🔧 Tools
 
 ### Connection
 | Tool | Description |
 |------|-------------|
-| `kvm_connect(host, password, username?)` | Connect to a GLKVM device on the LAN |
+| `kvm_connect(host?, password?, username?)` | Connect to a GLKVM device on the LAN (empty args fall back to `.env`) |
 | `kvm_disconnect()` | Close the session |
 | `kvm_status()` | Report connection state and held keys |
 

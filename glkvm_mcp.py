@@ -7,6 +7,7 @@
 #     "httpx>=0.27",
 #     "Pillow>=10",
 #     "pytesseract>=0.3.13",
+#     "python-dotenv>=1",
 # ]
 # ///
 """
@@ -37,14 +38,20 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional, TypedDict
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
 import websockets
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP, Image
+
+# Optional .env next to this script; real environment variables take precedence.
+load_dotenv(Path(__file__).with_name(".env"))
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -291,18 +298,28 @@ class ConnectResult(TypedDict):
 
 
 @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
-async def kvm_connect(host: str, password: str, username: str = "admin") -> ConnectResult:
+async def kvm_connect(host: str = "", password: str = "", username: str = "") -> ConnectResult:
     """
     Connect to a GLKVM device on the LAN and authenticate.
 
+    Any argument left empty falls back to GLKVM_HOST / GLKVM_PASSWORD /
+    GLKVM_USERNAME from the environment or the .env file next to this script.
+    If those are configured, call this with no arguments.
+
     Args:
         host: device hostname or IP (e.g. "192.168.8.55" or "glkvm.local"). HTTPS assumed.
-        password: KVM web admin password (no default — must be supplied by the caller).
+        password: KVM web admin password.
         username: KVM web admin username (default "admin").
 
     Returns:
         connected, host, message.
     """
+    host = host or os.environ.get("GLKVM_HOST", "")
+    password = password or os.environ.get("GLKVM_PASSWORD", "")
+    username = username or os.environ.get("GLKVM_USERNAME") or "admin"
+    if not host or not password:
+        raise ValueError("host and password required: pass them or set GLKVM_HOST / GLKVM_PASSWORD in .env")
+
     global _conn
     if _conn is not None:
         await kvm_disconnect()  # type: ignore[func-returns-value]
@@ -901,4 +918,5 @@ if __name__ == "__main__":
     # Suppress noisy InsecureRequestWarning from urllib3 (we know — self-signed cert).
     import warnings
     warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+    LOG.info("GLKVM MCP server ready on stdio (default host: %s)", os.environ.get("GLKVM_HOST") or "none, pass to kvm_connect")
     mcp.run()  # stdio
