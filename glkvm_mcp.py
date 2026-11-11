@@ -65,6 +65,7 @@ STALE_S = 0.250                # release a held key if not refreshed in 250 ms
 WATCHDOG_PERIOD_S = 0.040
 WS_PING_PERIOD_S = 1.0
 HTTP_TIMEOUT_S = 10.0
+OCR_SCALES = (2, 3, 1)           # upscale factors to OCR at; later ones only tried when a search misses
 SNAPSHOT_WAIT_S = 5              # max wait for the streamer to start before a snapshot fails
 
 LOG = logging.getLogger("glkvm_mcp")
@@ -806,7 +807,19 @@ def _run_ocr(image_bytes: bytes, search_text: str = "") -> dict:
     Run Tesseract OCR on raw JPEG bytes.
     Returns {"width": W, "height": H, "elements": [...], "tesseract_found": bool}.
     Each element: {text, confidence, x_pct, y_pct, pixel: [cx, cy], box: [x,y,w,h]}.
+
+    Which upscale factor reads small UI text best varies per screen, so a
+    search that misses is retried at the other OCR_SCALES.
     """
+    for scale in OCR_SCALES if search_text else OCR_SCALES[:1]:
+        result = _run_ocr_at(image_bytes, search_text, scale)
+        if result["elements"] or not result["tesseract_found"]:
+            break
+    return result
+
+
+def _run_ocr_at(image_bytes: bytes, search_text: str, scale: int) -> dict:
+    """One OCR pass with the image upscaled by `scale` (boxes mapped back)."""
     from PIL import Image as _PILImage
 
     img_w, img_h = _jpeg_dimensions(image_bytes)
@@ -830,6 +843,12 @@ def _run_ocr(image_bytes: bytes, search_text: str = "") -> dict:
     _pyt.pytesseract.tesseract_cmd = _TESSERACT_BIN
 
     pil_img = _PILImage.open(_io.BytesIO(image_bytes))
+    # Tesseract misses small UI text (menus, title bars) at native size;
+    # greyscale + upscale fixes most of it. Boxes are scaled back below.
+    if scale != 1:
+        pil_img = pil_img.convert("L").resize(
+            (pil_img.width * scale, pil_img.height * scale), _PILImage.Resampling.LANCZOS
+        )
     # image_to_data gives word-level bounding boxes + confidence
     data = _pyt.image_to_data(pil_img, output_type=_pyt.Output.DICT)
 
@@ -845,10 +864,10 @@ def _run_ocr(image_bytes: bytes, search_text: str = "") -> dict:
             continue
         if search_lower and search_lower not in word.lower():
             continue
-        x = int(data["left"][i])
-        y = int(data["top"][i])
-        w = int(data["width"][i])
-        h = int(data["height"][i])
+        x = int(data["left"][i]) // scale
+        y = int(data["top"][i]) // scale
+        w = int(data["width"][i]) // scale
+        h = int(data["height"][i]) // scale
         cx = x + w // 2
         cy = y + h // 2
         elements.append({
@@ -937,6 +956,16 @@ async def kvm_ocr_click(text: str, button: str = "left", count: int = 1, search_
     params: dict[str, str] = {"allow_offline": "true"}
     r = await _snapshot(conn, params)
     ocr = _run_ocr(r.content, text)
+
+    if not ocr["elements"]:
+        # The cursor (and the hover highlight under it) often sits on the very
+        # text we want, e.g. right after clicking it. Park it at the right edge
+        # and look again.
+        async with conn.send_lock:
+            await _ws_send_mouse_move(conn, 32767, 0)
+        await asyncio.sleep(0.3)
+        r = await _snapshot(conn, params)
+        ocr = _run_ocr(r.content, text)
 
     if not ocr["elements"]:
         return {"found": False, "text": text, "message": "No OCR matches for this text.",
