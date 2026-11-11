@@ -39,6 +39,7 @@ import asyncio
 import base64
 import logging
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -764,10 +765,28 @@ def _find_tesseract_binary() -> str | None:
         ):
             if _os.path.isfile(candidate):
                 return candidate
+    # 4. Homebrew on macOS (GUI-launched MCP clients often omit it from PATH)
+    for candidate in ("/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract"):
+        if _os.path.isfile(candidate):
+            return candidate
     return None
 
 
 _TESSERACT_BIN: str | None = _find_tesseract_binary()
+
+# pytesseract passes the image to tesseract via a temp file. MCP clients usually
+# launch servers without TMPDIR, so Python falls back to /tmp — and Homebrew's
+# Leptonica on macOS rewrites /tmp paths and then can't find the file.
+# Use the per-user temp dir instead.
+if sys.platform == "darwin" and not _os.environ.get("TMPDIR"):
+    import subprocess as _subprocess
+    import tempfile as _tempfile
+    try:
+        _tempfile.tempdir = _subprocess.run(
+            ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True, check=True
+        ).stdout.strip() or None
+    except (OSError, _subprocess.CalledProcessError):
+        pass
 
 
 def _jpeg_dimensions(data: bytes) -> tuple[int, int]:
