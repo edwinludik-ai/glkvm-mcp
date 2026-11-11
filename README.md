@@ -186,3 +186,4 @@ This server includes fixes for known GLKVM/PiKVM firmware bugs:
 ## License
 
 MIT
+# teams-calendar-mcp
