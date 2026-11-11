@@ -40,6 +40,7 @@ import base64
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Optional, TypedDict
 from pathlib import Path
@@ -63,6 +64,7 @@ STALE_S = 0.250                # release a held key if not refreshed in 250 ms
 WATCHDOG_PERIOD_S = 0.040
 WS_PING_PERIOD_S = 1.0
 HTTP_TIMEOUT_S = 10.0
+SNAPSHOT_WAIT_S = 5              # max wait for the streamer to start before a snapshot fails
 
 LOG = logging.getLogger("glkvm_mcp")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -287,7 +289,32 @@ async def _press_with_modifiers(conn: Connection, key: str, modifiers: list[str]
 # ---------------------------------------------------------------------------
 # MCP server
 # ---------------------------------------------------------------------------
-mcp = FastMCP("glkvm")
+async def _snapshot(conn: "Connection", params: dict) -> httpx.Response:
+    """GET a snapshot; retry 503 while the on-demand streamer warms up after connect."""
+    for _ in range(SNAPSHOT_WAIT_S * 4):
+        r = await conn.http.get(f"{conn.base_url}/api/streamer/snapshot", params=params)
+        if r.status_code != 503:
+            break
+        await asyncio.sleep(0.25)
+    r.raise_for_status()
+    return r
+
+
+@asynccontextmanager
+async def _lifespan(_server):
+    """Auto-connect at startup when .env/environment has credentials."""
+    if os.environ.get("GLKVM_HOST") and os.environ.get("GLKVM_PASSWORD"):
+        try:
+            await kvm_connect()
+        except Exception as e:  # noqa: BLE001 - server stays up; agent can retry kvm_connect
+            LOG.error("auto-connect failed: %s", e)
+    try:
+        yield
+    finally:
+        await kvm_disconnect()
+
+
+mcp = FastMCP("glkvm", lifespan=_lifespan)
 
 
 # ---- Connection management ------------------------------------------------
@@ -340,7 +367,12 @@ async def kvm_connect(host: str = "", password: str = "", username: str = "") ->
             f"{base_url}/api/auth/login",
             data={"user": username, "passwd": password, "expire": "0"},
         )
-        login.raise_for_status()
+        if login.is_error:
+            try:
+                detail = login.json()["result"]["error_msg"]
+            except Exception:  # noqa: BLE001
+                detail = login.text[:200]
+            raise RuntimeError(f"HTTP {login.status_code}: {detail}")
         if "auth_token" not in http.cookies and login.json().get("two_step_required"):
             raise RuntimeError("Two-step login required; not implemented in this build.")
         token = http.cookies.get("auth_token")
@@ -353,7 +385,7 @@ async def kvm_connect(host: str = "", password: str = "", username: str = "") ->
     # Open the control WebSocket. Pass the token as a query param so we don't
     # have to fight the websockets lib's cookie handling.
     ws_scheme = "wss" if parsed.scheme == "https" else "ws"
-    ws_url = f"{ws_scheme}://{parsed.netloc}/api/ws?auth_token={token}&stream=false"
+    ws_url = f"{ws_scheme}://{parsed.netloc}/api/ws?auth_token={token}&stream=true"  # stream=true makes kvmd run the streamer, needed for snapshots
     import ssl as _ssl
     sslctx = _ssl.create_default_context()
     sslctx.check_hostname = False
@@ -622,8 +654,7 @@ async def kvm_screenshot(preview: bool = True, max_width: int = 1024, quality: i
         params["preview"] = "true"
         params["preview_max_width"] = str(int(max_width))
         params["preview_quality"] = str(max(1, min(100, int(quality))))
-    r = await conn.http.get(f"{conn.base_url}/api/streamer/snapshot", params=params)
-    r.raise_for_status()
+    r = await _snapshot(conn, params)
     return Image(data=r.content, format="jpeg")
 
 
@@ -646,8 +677,7 @@ async def kvm_screenshot_to_file(path: str, preview: bool = False, max_width: in
         params["preview"] = "true"
         params["preview_max_width"] = str(int(max_width))
         params["preview_quality"] = str(max(1, min(100, int(quality))))
-    r = await conn.http.get(f"{conn.base_url}/api/streamer/snapshot", params=params)
-    r.raise_for_status()
+    r = await _snapshot(conn, params)
     with open(path, "wb") as f:
         f.write(r.content)
     return {"path": path, "bytes": len(r.content), "mime_type": r.headers.get("content-type", "image/jpeg")}
@@ -803,8 +833,7 @@ async def kvm_ocr_screenshot(search_text: str = "", preview: bool = False) -> di
         params["preview"] = "true"
         params["preview_max_width"] = "1280"
         params["preview_quality"] = "80"
-    r = await conn.http.get(f"{conn.base_url}/api/streamer/snapshot", params=params)
-    r.raise_for_status()
+    r = await _snapshot(conn, params)
     return _run_ocr(r.content, search_text)
 
 
@@ -835,8 +864,7 @@ async def kvm_ocr_click(text: str, button: str = "left", count: int = 1, search_
 
     # Capture + OCR
     params: dict[str, str] = {"allow_offline": "true"}
-    r = await conn.http.get(f"{conn.base_url}/api/streamer/snapshot", params=params)
-    r.raise_for_status()
+    r = await _snapshot(conn, params)
     ocr = _run_ocr(r.content, text)
 
     if not ocr["elements"]:
