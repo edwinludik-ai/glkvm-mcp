@@ -1,15 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "mcp[cli]>=1.2,<2",
-#     "websockets>=12",
-#     "httpx>=0.27",
-#     "Pillow>=10",
-#     "pytesseract>=0.3.13",
-#     "python-dotenv>=1",
-# ]
-# ///
+#!/usr/bin/env -S pdm run start
 """
 GLKVM MCP Server
 ================
