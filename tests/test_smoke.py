@@ -103,6 +103,19 @@ class SmokeTest(unittest.TestCase):
             self.assertIn(ch, us, ch)
             self.assertIn(ch, de, ch)
 
+    def test_ocr_engine_selection(self):
+        mod = _load_module()
+        os.environ["GLKVM_OCR_ENGINE"] = "tesseract"
+        mod._ocr_engine_cache = None
+        self.assertIsInstance(mod._get_ocr_engine(), mod.TesseractOCREngine)
+        os.environ["GLKVM_OCR_ENGINE"] = "macos"
+        mod._ocr_engine_cache = None
+        eng = mod._get_ocr_engine()
+        self.assertIsInstance(eng, mod.MacVisionOCREngine)
+        self.assertEqual(eng.available, sys.platform == "darwin")
+        os.environ.pop("GLKVM_OCR_ENGINE")
+        mod._ocr_engine_cache = None
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

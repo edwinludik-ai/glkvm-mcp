@@ -505,12 +505,12 @@ async def kvm_reload_env(reconnect: bool = True) -> dict:
     Re-read the .env file next to this script without restarting the server.
 
     Picks up edited GLKVM_HOST / GLKVM_USERNAME / GLKVM_PASSWORD / GLKVM_KEYMAP /
-    TESSERACT_PATH. Real environment variables still take precedence over .env.
+    TESSERACT_PATH / GLKVM_OCR_ENGINE. Real environment variables still take precedence over .env.
 
     Args:
         reconnect: if currently connected, reconnect using the new values.
     """
-    global _TESSERACT_BIN
+    global _ocr_engine_cache
     values = dotenv_values(ENV_FILE) if ENV_FILE.exists() else {}
     for k in set(os.environ) - _REAL_ENV_KEYS - set(values):
         del os.environ[k]  # removed from .env since last load
@@ -518,7 +518,7 @@ async def kvm_reload_env(reconnect: bool = True) -> dict:
         if k not in _REAL_ENV_KEYS and v is not None:
             os.environ[k] = v
     _apply_keymap()
-    _TESSERACT_BIN = _find_tesseract_binary()
+    _ocr_engine_cache = None  # re-probe OCR engine (TESSERACT_PATH / GLKVM_OCR_ENGINE may have changed)
     result = {"env_file": str(ENV_FILE), "found": ENV_FILE.exists(), "keymap": KEYMAP_NAME,
               "keys": sorted(values), "reconnected": False}
     if reconnect and _conn is not None:
@@ -767,9 +767,11 @@ async def kvm_screenshot_to_file(path: str, preview: bool = False, max_width: in
 
 
 # ---- OCR-enhanced screenshot tools ----------------------------------------
-# These tools integrate Tesseract OCR so the agent gets structured text +
+# These tools run OCR on screenshots so the agent gets structured text +
 # coordinates alongside the raw image, eliminating the need for vision models
 # to estimate pixel positions (which are unreliable — often off by 30%+).
+# The engine is pluggable: Tesseract (used when its binary is found) or the
+# macOS-native Vision framework. Select with GLKVM_OCR_ENGINE=auto|tesseract|macos.
 
 import io as _io
 import shutil as _shutil
@@ -802,8 +804,6 @@ def _find_tesseract_binary() -> str | None:
     return None
 
 
-_TESSERACT_BIN: str | None = _find_tesseract_binary()
-
 # pytesseract passes the image to tesseract via a temp file. MCP clients usually
 # launch servers without TMPDIR, so Python falls back to /tmp — and Homebrew's
 # Leptonica on macOS rewrites /tmp paths and then can't find the file.
@@ -831,94 +831,219 @@ def _jpeg_dimensions(data: bytes) -> tuple[int, int]:
     return 1920, 1080
 
 
+def _make_element(text: str, conf: float, x: int, y: int, w: int, h: int, img_w: int, img_h: int) -> dict:
+    cx, cy = x + w // 2, y + h // 2
+    return {
+        "text": text,
+        "confidence": round(conf, 1),
+        "x_pct": round(cx / img_w * 100, 1),
+        "y_pct": round(cy / img_h * 100, 1),
+        "pixel": [cx, cy],
+        "box": [x, y, w, h],
+    }
+
+
+class OCREngine:
+    """Pluggable OCR backend. recognize() returns {"width", "height", "elements": [...]};
+    each element is {text, confidence(0-100), x_pct, y_pct, pixel: [cx, cy], box: [x, y, w, h]}."""
+    name = "base"
+
+    @property
+    def available(self) -> bool:
+        return False
+
+    def recognize(self, image_bytes: bytes, search_text: str = "", scale: int = 1) -> dict:
+        raise NotImplementedError
+
+
+class TesseractOCREngine(OCREngine):
+    name = "tesseract"
+
+    def __init__(self) -> None:
+        self._bin = _find_tesseract_binary()
+
+    @property
+    def available(self) -> bool:
+        return self._bin is not None
+
+    def recognize(self, image_bytes: bytes, search_text: str = "", scale: int = 1) -> dict:
+        """One OCR pass with the image upscaled by `scale` (boxes mapped back)."""
+        from PIL import Image as _PILImage
+
+        img_w, img_h = _jpeg_dimensions(image_bytes)
+        result: dict = {"width": img_w, "height": img_h, "elements": []}
+
+        if self._bin is None:
+            result["error"] = (
+                "Tesseract OCR binary not found. Install it: "
+                "Windows: choco install tesseract-ocr  |  macOS: brew install tesseract  |  "
+                "Linux: apt-get install tesseract-ocr  — or set TESSERACT_PATH env var, "
+                "or GLKVM_OCR_ENGINE=macos on macOS to use the native Vision framework."
+            )
+            return result
+
+        import pytesseract as _pyt
+
+        _pyt.pytesseract.tesseract_cmd = self._bin
+
+        pil_img = _PILImage.open(_io.BytesIO(image_bytes))
+        # Tesseract misses small UI text (menus, title bars) at native size;
+        # greyscale + upscale fixes most of it. Boxes are scaled back below.
+        if scale != 1:
+            pil_img = pil_img.convert("L").resize(
+                (pil_img.width * scale, pil_img.height * scale), _PILImage.Resampling.LANCZOS
+            )
+        # image_to_data gives word-level bounding boxes + confidence
+        data = _pyt.image_to_data(pil_img, output_type=_pyt.Output.DICT)
+
+        elements: list[dict] = []
+        search_lower = search_text.strip().lower() if search_text else ""
+
+        for i in range(len(data["text"])):
+            word = data["text"][i].strip()
+            if not word:
+                continue
+            conf = float(data["conf"][i]) if data["conf"][i] not in ("", "-1") else 0.0
+            if conf < 30:  # skip low-confidence noise
+                continue
+            if search_lower and search_lower not in word.lower():
+                continue
+            x = int(data["left"][i]) // scale
+            y = int(data["top"][i]) // scale
+            w = int(data["width"][i]) // scale
+            h = int(data["height"][i]) // scale
+            elements.append(_make_element(word, conf, x, y, w, h, img_w, img_h))
+
+        result["elements"] = elements
+        return result
+
+
+class MacVisionOCREngine(OCREngine):
+    """macOS native OCR via the Vision framework (VNRecognizeTextRequest) — the same
+    call pattern as github.com/dielect/mac-ocr-cli (ocrmac), without its web server.
+    Needs pyobjc-framework-Vision on macOS (installed automatically via pyproject)."""
+
+    name = "macos-vision"
+
+    def __init__(self) -> None:
+        self._ok = False
+        if sys.platform == "darwin":
+            try:
+                import Vision  # noqa: F401
+                import objc  # noqa: F401
+                self._ok = True
+            except ImportError:
+                self._ok = False
+
+    @property
+    def available(self) -> bool:
+        return self._ok
+
+    def recognize(self, image_bytes: bytes, search_text: str = "", scale: int = 1) -> dict:
+        from PIL import Image as _PILImage
+
+        img_w, img_h = _jpeg_dimensions(image_bytes)
+        result: dict = {"width": img_w, "height": img_h, "elements": []}
+
+        if not self._ok:
+            result["error"] = (
+                "macOS Vision OCR unavailable. On macOS run `pdm install` (installs "
+                "pyobjc-framework-Vision) — or use GLKVM_OCR_ENGINE=tesseract instead."
+            )
+            return result
+
+        import Vision
+        import objc
+
+        pil_img = _PILImage.open(_io.BytesIO(image_bytes))
+        if scale != 1:
+            pil_img = pil_img.convert("L").resize(
+                (pil_img.width * scale, pil_img.height * scale), _PILImage.Resampling.LANCZOS
+            )
+        buf = _io.BytesIO()
+        pil_img.save(buf, format="PNG")
+
+        elements: list[dict] = []
+        search_lower = search_text.strip().lower() if search_text else ""
+        with objc.autorelease_pool():
+            req = Vision.VNRecognizeTextRequest.alloc().init()
+            req.setRecognitionLevel_(0)  # 0 = accurate
+            handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(buf.getvalue(), None)
+            ret = handler.performRequests_error_([req], None)
+            # PyObjC returns either a bool or a (bool, NSError|None) tuple.
+            ok = ret[0] if isinstance(ret, tuple) else bool(ret)
+            if ok:
+                for r in req.results() or []:
+                    word = r.text().strip()
+                    if not word:
+                        continue
+                    conf = float(r.confidence()) * 100  # Vision is 0-1; normalize to 0-100 like tesseract
+                    if conf < 30:
+                        continue
+                    if search_lower and search_lower not in word.lower():
+                        continue
+                    bb = r.boundingBox()
+                    # Vision bbox is normalized 0-1 with bottom-left origin; flip to top-left.
+                    nx = bb.origin.x
+                    ny = 1.0 - bb.origin.y - bb.size.height
+                    x = int(nx * img_w)
+                    y = int(ny * img_h)
+                    w = max(1, int(bb.size.width * img_w))
+                    h = max(1, int(bb.size.height * img_h))
+                    elements.append(_make_element(word, conf, x, y, w, h, img_w, img_h))
+
+        result["elements"] = elements
+        return result
+
+
+_ocr_engine_cache: Optional[OCREngine] = None
+
+
+def _get_ocr_engine() -> OCREngine:
+    """Pick the OCR engine from GLKVM_OCR_ENGINE (auto|tesseract|macos).
+    auto = tesseract when its binary is found, else native Vision on macOS."""
+    global _ocr_engine_cache
+    if _ocr_engine_cache is not None:
+        return _ocr_engine_cache
+    choice = os.environ.get("GLKVM_OCR_ENGINE", "auto").strip().lower()
+    tess = TesseractOCREngine()
+    mac = MacVisionOCREngine()
+    if choice in ("macos", "mac", "vision", "macos-vision"):
+        engine: OCREngine = mac
+    elif choice in ("tesseract", "tess"):
+        engine = tess
+    else:
+        engine = tess if tess.available else mac
+    _ocr_engine_cache = engine
+    return engine
+
+
 def _run_ocr(image_bytes: bytes, search_text: str = "") -> dict:
     """
-    Run Tesseract OCR on raw JPEG bytes.
-    Returns {"width": W, "height": H, "elements": [...], "tesseract_found": bool}.
+    Run OCR on raw JPEG bytes with the configured engine.
+    Returns {"width": W, "height": H, "elements": [...], "engine": name, "engine_available": bool}.
     Each element: {text, confidence, x_pct, y_pct, pixel: [cx, cy], box: [x,y,w,h]}.
 
     Which upscale factor reads small UI text best varies per screen, so a
     search that misses is retried at the other OCR_SCALES.
     """
+    engine = _get_ocr_engine()
     for scale in OCR_SCALES if search_text else OCR_SCALES[:1]:
-        result = _run_ocr_at(image_bytes, search_text, scale)
-        if result["elements"] or not result["tesseract_found"]:
+        result = engine.recognize(image_bytes, search_text, scale)
+        if result["elements"] or not engine.available:
             break
-    return result
-
-
-def _run_ocr_at(image_bytes: bytes, search_text: str, scale: int) -> dict:
-    """One OCR pass with the image upscaled by `scale` (boxes mapped back)."""
-    from PIL import Image as _PILImage
-
-    img_w, img_h = _jpeg_dimensions(image_bytes)
-    result: dict = {
-        "width": img_w,
-        "height": img_h,
-        "elements": [],
-        "tesseract_found": _TESSERACT_BIN is not None,
-    }
-
-    if _TESSERACT_BIN is None:
-        result["error"] = (
-            "Tesseract OCR binary not found. Install it: "
-            "Windows: choco install tesseract-ocr  |  macOS: brew install tesseract  |  "
-            "Linux: apt-get install tesseract-ocr  — or set TESSERACT_PATH env var."
-        )
-        return result
-
-    import pytesseract as _pyt
-
-    _pyt.pytesseract.tesseract_cmd = _TESSERACT_BIN
-
-    pil_img = _PILImage.open(_io.BytesIO(image_bytes))
-    # Tesseract misses small UI text (menus, title bars) at native size;
-    # greyscale + upscale fixes most of it. Boxes are scaled back below.
-    if scale != 1:
-        pil_img = pil_img.convert("L").resize(
-            (pil_img.width * scale, pil_img.height * scale), _PILImage.Resampling.LANCZOS
-        )
-    # image_to_data gives word-level bounding boxes + confidence
-    data = _pyt.image_to_data(pil_img, output_type=_pyt.Output.DICT)
-
-    elements: list[dict] = []
-    search_lower = search_text.strip().lower() if search_text else ""
-
-    for i in range(len(data["text"])):
-        word = data["text"][i].strip()
-        if not word:
-            continue
-        conf = float(data["conf"][i]) if data["conf"][i] not in ("", "-1") else 0.0
-        if conf < 30:  # skip low-confidence noise
-            continue
-        if search_lower and search_lower not in word.lower():
-            continue
-        x = int(data["left"][i]) // scale
-        y = int(data["top"][i]) // scale
-        w = int(data["width"][i]) // scale
-        h = int(data["height"][i]) // scale
-        cx = x + w // 2
-        cy = y + h // 2
-        elements.append({
-            "text": word,
-            "confidence": round(conf, 1),
-            "x_pct": round(cx / img_w * 100, 1),
-            "y_pct": round(cy / img_h * 100, 1),
-            "pixel": [cx, cy],
-            "box": [x, y, w, h],
-        })
-
-    # Sort by confidence descending, then by position
-    elements.sort(key=lambda e: (-e["confidence"], e["y_pct"], e["x_pct"]))
-    result["elements"] = elements
+    result["engine"] = engine.name
+    result["engine_available"] = engine.available
+    result["elements"].sort(key=lambda e: (-e["confidence"], e["y_pct"], e["x_pct"]))
     return result
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True})
 async def kvm_ocr_screenshot(search_text: str = "", preview: bool = False) -> dict:
     """
-    Capture a full-resolution screenshot from the remote machine AND run Tesseract
-    OCR on it. Returns every detected text element with its exact pixel and
+    Capture a full-resolution screenshot from the remote machine AND run OCR
+    on it (engine per GLKVM_OCR_ENGINE: "tesseract" or "macos-vision"). Returns
+    every detected text element with its exact pixel and
     percentage coordinates — ready to feed directly into kvm_mouse_move_pct().
 
     This eliminates the need for vision models to estimate pixel positions,
@@ -932,7 +1057,7 @@ async def kvm_ocr_screenshot(search_text: str = "", preview: bool = False) -> di
             accuracy). Default False = full resolution for maximum OCR accuracy.
 
     Returns:
-        {"width": 1920, "height": 1080, "tesseract_found": true,
+        {"width": 1920, "height": 1080, "engine": "tesseract", "engine_available": true,
          "elements": [
            {"text": "Day", "confidence": 95.2, "x_pct": 39.2, "y_pct": 12.5,
             "pixel": [753, 135], "box": [730, 110, 46, 25]},
@@ -961,7 +1086,8 @@ async def kvm_ocr_click(text: str, button: str = "left", count: int = 1, search_
     """
     Find text on the remote screen via OCR and click on it — all in one call.
 
-    Captures a full-resolution screenshot, runs Tesseract OCR to find the exact
+    Captures a full-resolution screenshot, runs OCR (engine per GLKVM_OCR_ENGINE)
+    to find the exact
     pixel position of the specified text, moves the mouse there, and clicks.
 
     Args:
@@ -998,7 +1124,7 @@ async def kvm_ocr_click(text: str, button: str = "left", count: int = 1, search_
 
     if not ocr["elements"]:
         return {"found": False, "text": text, "message": "No OCR matches for this text.",
-                "tesseract_found": ocr.get("tesseract_found", False)}
+                "engine": ocr.get("engine"), "engine_available": ocr.get("engine_available", False)}
 
     elements = ocr["elements"]
 

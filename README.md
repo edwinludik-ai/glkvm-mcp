@@ -82,6 +82,8 @@ cp .env.example .env   # then edit; .env is gitignored
 
 Set `GLKVM_KEYMAP` to the keyboard layout of the **remote** machine (`us` default, or `de`); otherwise `kvm_send_text` types e.g. `z` as `y` on a German PC.
 
+Set `GLKVM_OCR_ENGINE` to pick the OCR backend: `tesseract` (default when the binary is found), `macos` for the macOS-native Vision framework (no Tesseract install needed on a Mac), or `auto` (tesseract if installed, else macOS Vision).
+
 With `GLKVM_HOST` and `GLKVM_PASSWORD` set, the agent can call `kvm_connect()` with no arguments. Real environment variables (e.g. an `env` block in your MCP client config) override `.env`. After editing `.env`, the agent can call `kvm_reload_env()` to pick up changes without restarting the server.
 
 ## 🔧 Tools
