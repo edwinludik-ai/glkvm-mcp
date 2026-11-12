@@ -52,18 +52,18 @@ Add to your MCP client config (e.g., Claude Desktop `claude_desktop_config.json`
 {
   "mcpServers": {
     "glkvm": {
-      "command": "uv",
+      "command": "pdm",
       "args": [
         "run",
-        "--script",
-        "/path/to/glkvm_mcp.py"
-      ]
+        "start"
+      ],
+      "cwd": "/path/to/glkvm-mcp"
     }
   }
 }
 ```
 
-Python dependencies (`mcp`, `websockets`, `httpx`, `Pillow`, `pytesseract`) are auto-installed by `uv run --script` via the inline PEP 723 metadata.
+Python dependencies (`mcp`, `websockets`, `httpx`, `Pillow`, `pytesseract`) are declared in `pyproject.toml` and installed with `pdm install`.
 
 ### 3. (Optional) Store connection details in `.env`
 

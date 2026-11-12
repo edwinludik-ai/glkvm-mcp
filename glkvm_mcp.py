@@ -18,8 +18,7 @@ Scope: LAN only. TLS verification is disabled because the device ships a
 self-signed certificate. Do not expose this server's stdio to a remote agent
 without first confirming the target host is on a trusted network.
 
-Run: `uv run glkvm_mcp.py`   (or `python glkvm_mcp.py` after `pip install` of
-the dependencies above).
+Run: `pdm run start`   (or `python glkvm_mcp.py` after `pdm install`).
 """
 
 from __future__ import annotations
