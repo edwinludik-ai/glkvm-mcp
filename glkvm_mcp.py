@@ -49,11 +49,13 @@ from urllib.parse import urlparse
 
 import httpx
 import websockets
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from mcp.server.fastmcp import FastMCP, Image
 
 # Optional .env next to this script; real environment variables take precedence.
-load_dotenv(Path(__file__).with_name(".env"))
+ENV_FILE = Path(__file__).with_name(".env")
+_REAL_ENV_KEYS = set(os.environ)  # never overwritten by .env, even on reload
+load_dotenv(ENV_FILE)
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -154,11 +156,23 @@ def _build_keymap_de() -> dict[str, tuple[str, tuple[str, ...]]]:
 
 
 KEYMAPS = {"us": (_build_keymap, set()), "de": (_build_keymap_de, {"^", "`"})}
-KEYMAP_NAME = os.environ.get("GLKVM_KEYMAP", "us").strip().lower()
-if KEYMAP_NAME not in KEYMAPS:
-    raise SystemExit(f"GLKVM_KEYMAP={KEYMAP_NAME!r} unsupported; use one of {sorted(KEYMAPS)}")
-CHAR_TO_KEY = KEYMAPS[KEYMAP_NAME][0]()
-DEAD_KEYS = KEYMAPS[KEYMAP_NAME][1]  # need a Space after them to produce the literal char
+
+
+def _apply_keymap() -> None:
+    """Set KEYMAP_NAME / CHAR_TO_KEY / DEAD_KEYS from GLKVM_KEYMAP."""
+    global KEYMAP_NAME, CHAR_TO_KEY, DEAD_KEYS
+    name = os.environ.get("GLKVM_KEYMAP", "us").strip().lower()
+    if name not in KEYMAPS:
+        raise ValueError(f"GLKVM_KEYMAP={name!r} unsupported; use one of {sorted(KEYMAPS)}")
+    KEYMAP_NAME = name
+    CHAR_TO_KEY = KEYMAPS[name][0]()
+    DEAD_KEYS = KEYMAPS[name][1]  # need a Space after them to produce the literal char
+
+
+try:
+    _apply_keymap()
+except ValueError as e:
+    raise SystemExit(str(e)) from e
 
 # Aliases accepted in send_keys() chord strings. Maps lowercase user input ->
 # canonical W3C name used by GLKVM kvmd.
@@ -495,6 +509,33 @@ async def kvm_disconnect() -> dict:
         pass
     _conn = None
     return {"connected": False, "message": "disconnected"}
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
+async def kvm_reload_env(reconnect: bool = True) -> dict:
+    """
+    Re-read the .env file next to this script without restarting the server.
+
+    Picks up edited GLKVM_HOST / GLKVM_USERNAME / GLKVM_PASSWORD / GLKVM_KEYMAP /
+    TESSERACT_PATH. Real environment variables still take precedence over .env.
+
+    Args:
+        reconnect: if currently connected, reconnect using the new values.
+    """
+    global _TESSERACT_BIN
+    values = dotenv_values(ENV_FILE) if ENV_FILE.exists() else {}
+    for k in set(os.environ) - _REAL_ENV_KEYS - set(values):
+        del os.environ[k]  # removed from .env since last load
+    for k, v in values.items():
+        if k not in _REAL_ENV_KEYS and v is not None:
+            os.environ[k] = v
+    _apply_keymap()
+    _TESSERACT_BIN = _find_tesseract_binary()
+    result = {"env_file": str(ENV_FILE), "found": ENV_FILE.exists(), "keymap": KEYMAP_NAME,
+              "keys": sorted(values), "reconnected": False}
+    if reconnect and _conn is not None:
+        result["reconnected"] = (await kvm_connect())["connected"]
+    return result
 
 
 # ---- Keyboard tools -------------------------------------------------------

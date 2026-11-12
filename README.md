@@ -73,7 +73,7 @@ cp .env.example .env   # then edit; .env is gitignored
 
 Set `GLKVM_KEYMAP` to the keyboard layout of the **remote** machine (`us` default, or `de`); otherwise `kvm_send_text` types e.g. `z` as `y` on a German PC.
 
-With `GLKVM_HOST` and `GLKVM_PASSWORD` set, the agent can call `kvm_connect()` with no arguments. Real environment variables (e.g. an `env` block in your MCP client config) override `.env`.
+With `GLKVM_HOST` and `GLKVM_PASSWORD` set, the agent can call `kvm_connect()` with no arguments. Real environment variables (e.g. an `env` block in your MCP client config) override `.env`. After editing `.env`, the agent can call `kvm_reload_env()` to pick up changes without restarting the server.
 
 ## 🔧 Tools
 
@@ -83,6 +83,7 @@ With `GLKVM_HOST` and `GLKVM_PASSWORD` set, the agent can call `kvm_connect()` w
 | `kvm_connect(host?, password?, username?)` | Connect to a GLKVM device on the LAN (empty args fall back to `.env`) |
 | `kvm_disconnect()` | Close the session |
 | `kvm_status()` | Report connection state and held keys |
+| `kvm_reload_env(reconnect?)` | Re-read `.env` (host, credentials, keymap, Tesseract path); reconnects if already connected |
 
 ### Keyboard
 | Tool | Description |

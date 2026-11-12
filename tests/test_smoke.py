@@ -35,6 +35,7 @@ EXPECTED_TOOLS = {
     "kvm_screenshot",
     "kvm_screenshot_to_file",
     "kvm_status",
+    "kvm_reload_env",
 }
 
 
@@ -73,6 +74,21 @@ class SmokeTest(unittest.TestCase):
             required, set(),
             msg=f"kvm_connect args should all be optional (.env fallback), got {required}",
         )
+
+    def test_reload_env(self):
+        import tempfile
+        from pathlib import Path
+        mod = _load_module()
+        with tempfile.TemporaryDirectory() as d:
+            mod.ENV_FILE = Path(d, ".env")
+            mod.ENV_FILE.write_text("GLKVM_KEYMAP=de\nGLKVM_TEST_X=1\n")
+            r = asyncio.run(mod.kvm_reload_env())
+            self.assertEqual((r["keymap"], mod.KEYMAP_NAME, os.environ["GLKVM_TEST_X"]), ("de", "de", "1"))
+            self.assertEqual(mod.CHAR_TO_KEY["z"][0], "KeyY")
+            mod.ENV_FILE.write_text("")
+            asyncio.run(mod.kvm_reload_env())
+            self.assertNotIn("GLKVM_TEST_X", os.environ)
+            self.assertEqual(mod.KEYMAP_NAME, os.environ.get("GLKVM_KEYMAP", "us"))
 
     def test_keymaps(self):
         mod = _load_module()
