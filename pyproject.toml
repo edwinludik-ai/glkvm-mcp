@@ -12,5 +12,9 @@ dependencies = [
     "python-dotenv>=1",
 ]
 
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
 [tool.pdm.scripts]
 start = {cmd = "python glkvm_mcp.py"}

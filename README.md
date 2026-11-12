@@ -44,7 +44,16 @@ brew install tesseract
 sudo apt-get install tesseract-ocr
 ```
 
-### 2. Configure in your MCP client
+### 2. Install dependencies with PDM
+
+```bash
+cd /path/to/glkvm-mcp
+pdm install
+```
+
+This creates the virtualenv and installs all Python dependencies (`mcp`, `websockets`, `httpx`, `Pillow`, `pytesseract`) from `pyproject.toml` / `pdm.lock`.
+
+### 3. Configure in your MCP client
 
 Add to your MCP client config (e.g., Claude Desktop `claude_desktop_config.json`, Hermes `config.yaml`):
 
@@ -65,7 +74,7 @@ Add to your MCP client config (e.g., Claude Desktop `claude_desktop_config.json`
 
 Python dependencies (`mcp`, `websockets`, `httpx`, `Pillow`, `pytesseract`) are declared in `pyproject.toml` and installed with `pdm install`.
 
-### 3. (Optional) Store connection details in `.env`
+### 4. (Optional) Store connection details in `.env`
 
 ```bash
 cp .env.example .env   # then edit; .env is gitignored
